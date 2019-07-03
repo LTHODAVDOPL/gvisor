@@ -90,21 +90,23 @@ func (p *protocol) NewRawEndpoint(stack *stack.Stack, netProto tcpip.NetworkProt
 func (p *protocol) MinimumPacketSize() int {
 	switch p.number {
 	case ProtocolNumber4:
-		return header.ICMPv4EchoMinimumSize
+		return header.ICMPv4MinimumSize
 	case ProtocolNumber6:
-		return header.ICMPv6EchoMinimumSize
+		return header.ICMPv6MinimumSize
 	}
 	panic(fmt.Sprint("unknown protocol number: ", p.number))
 }
 
-// ParsePorts returns the source and destination ports stored in the given icmp
-// packet.
+// ParsePorts returns the (0, ICMP ID, nil) stored in the given icmp packet.
 func (p *protocol) ParsePorts(v buffer.View) (src, dst uint16, err *tcpip.Error) {
 	switch p.number {
 	case ProtocolNumber4:
-		return 0, binary.BigEndian.Uint16(v[header.ICMPv4MinimumSize:]), nil
+		return 0, binary.BigEndian.Uint16(v[4:]), nil
 	case ProtocolNumber6:
-		return 0, binary.BigEndian.Uint16(v[header.ICMPv6MinimumSize:]), nil
+		if len(v) < 6 {
+			return 0, 0, nil
+		}
+		return 0, binary.BigEndian.Uint16(v[4:]), nil
 	}
 	panic(fmt.Sprint("unknown protocol number: ", p.number))
 }

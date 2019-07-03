@@ -25,14 +25,7 @@ type ICMPv4 []byte
 
 const (
 	// ICMPv4MinimumSize is the minimum size of a valid ICMP packet.
-	ICMPv4MinimumSize = 4
-
-	// ICMPv4EchoMinimumSize is the minimum size of a valid ICMP echo packet.
-	ICMPv4EchoMinimumSize = 6
-
-	// ICMPv4DstUnreachableMinimumSize is the minimum size of a valid ICMP
-	// destination unreachable packet.
-	ICMPv4DstUnreachableMinimumSize = ICMPv4MinimumSize + 4
+	ICMPv4MinimumSize = 8
 
 	// ICMPv4ProtocolNumber is the ICMP transport protocol number.
 	ICMPv4ProtocolNumber tcpip.TransportProtocolNumber = 1
@@ -102,7 +95,10 @@ func (ICMPv4) SetSourcePort(uint16) {
 func (ICMPv4) SetDestinationPort(uint16) {
 }
 
-// Payload implements Transport.Payload.
+// Payload implements Transport.Payload, and returns bytes [4:8] of header and the body
 func (b ICMPv4) Payload() []byte {
-	return b[ICMPv4MinimumSize:]
+	// Header size of ICMPv4 is always 8 bytes: b[4:8] are filled with zeros, if they're not used;
+	// whereas ICMPv6 allows messages of size 4. For that reason, ICMPv6.Payload() returns b[4:],
+	// and we do the same for ICMPv4 to get consistent behavior from ICMP Payload() functions.
+	return b[4:]
 }
