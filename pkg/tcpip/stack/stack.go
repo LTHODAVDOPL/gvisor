@@ -988,9 +988,9 @@ func (s *Stack) RemoveWaker(nicid tcpip.NICID, addr tcpip.Address, waker *sleep.
 // transport dispatcher. Received packets that match the provided id will be
 // delivered to the given endpoint; specifying a nic is optional, but
 // nic-specific IDs have precedence over global ones.
-func (s *Stack) RegisterTransportEndpoint(nicID tcpip.NICID, netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, reusePort bool) *tcpip.Error {
+func (s *Stack) RegisterTransportEndpoint(nicID tcpip.NICID, netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, reusePort bool, bindToDevice tcpip.NICID) *tcpip.Error {
 	if nicID == 0 {
-		return s.demux.registerEndpoint(netProtos, protocol, id, ep, reusePort)
+		return s.demux.registerEndpoint(netProtos, protocol, id, ep, reusePort, bindToDevice)
 	}
 
 	s.mu.RLock()
@@ -1001,14 +1001,14 @@ func (s *Stack) RegisterTransportEndpoint(nicID tcpip.NICID, netProtos []tcpip.N
 		return tcpip.ErrUnknownNICID
 	}
 
-	return nic.demux.registerEndpoint(netProtos, protocol, id, ep, reusePort)
+	return nic.demux.registerEndpoint(netProtos, protocol, id, ep, reusePort, bindToDevice)
 }
 
 // UnregisterTransportEndpoint removes the endpoint with the given id from the
 // stack transport dispatcher.
-func (s *Stack) UnregisterTransportEndpoint(nicID tcpip.NICID, netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint) {
+func (s *Stack) UnregisterTransportEndpoint(nicID tcpip.NICID, netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, bindToDevice tcpip.NICID) {
 	if nicID == 0 {
-		s.demux.unregisterEndpoint(netProtos, protocol, id, ep)
+		s.demux.unregisterEndpoint(netProtos, protocol, id, ep, bindToDevice)
 		return
 	}
 
@@ -1017,7 +1017,7 @@ func (s *Stack) UnregisterTransportEndpoint(nicID tcpip.NICID, netProtos []tcpip
 
 	nic := s.nics[nicID]
 	if nic != nil {
-		nic.demux.unregisterEndpoint(netProtos, protocol, id, ep)
+		nic.demux.unregisterEndpoint(netProtos, protocol, id, ep, bindToDevice)
 	}
 }
 

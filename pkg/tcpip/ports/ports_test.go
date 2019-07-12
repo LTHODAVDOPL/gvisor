@@ -108,10 +108,10 @@ func TestPortReservation(t *testing.T) {
 
 			for _, test := range test.actions {
 				if test.release {
-					pm.ReleasePort(net, fakeTransNumber, test.ip, test.port)
+					pm.ReleasePort(net, fakeTransNumber, test.ip, test.port, 0)
 					continue
 				}
-				gotPort, err := pm.ReservePort(net, fakeTransNumber, test.ip, test.port, test.reuse)
+				gotPort, err := pm.ReservePort(net, fakeTransNumber, test.ip, test.port, test.reuse, 0)
 				if err != test.want {
 					t.Fatalf("ReservePort(.., .., %s, %d, %t) = %v, want %v", test.ip, test.port, test.release, err, test.want)
 				}

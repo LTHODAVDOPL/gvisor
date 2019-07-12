@@ -41,16 +41,98 @@ type transportEndpoints struct {
 	rawEndpoints []RawTransportEndpoint
 }
 
+// endpointsByNic has a map that is never empty.  None of the keys in it can be
+// zero.
+type endpointsByNic struct {
+	mu        sync.RWMutex
+	endpoints map[tcpip.NICID]TransportEndpoint
+}
+
+// HandlePacket is called by the stack when new packets arrive to this transport
+// endpoint.
+func (ep *endpointsByNic) HandlePacket(r *Route, id TransportEndpointID, vv buffer.VectorisedView) {
+	ep.mu.RLock()
+	defer ep.mu.RUnlock()
+
+	if e, ok := ep.endpoints[r.ref.nic.ID()]; ok {
+		e.HandlePacket(r, id, vv)
+	}
+}
+
+// HandleControlPacket implements stack.TransportEndpoint.HandleControlPacket.
+func (ep *endpointsByNic) HandleControlPacket(id TransportEndpointID, typ ControlType, extra uint32, vv buffer.VectorisedView) {
+	// Should never happen because we don't BindToDevice for Control Packets.
+}
+
+// registerEndpoint returns true if it succeeds.  It fails and returns
+// false if ep already has an element with the same key.
+func (ep *endpointsByNic) registerEndpoint(t TransportEndpoint, reusePort bool, bindToDevice tcpip.NICID) *tcpip.Error {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+
+	if e, ok := ep.endpoints[bindToDevice]; ok {
+		// There was already a bind.
+		if multiPortEp, ok := e.(*multiPortEndpoint); ok {
+			// This endpoint was previously bound with reuse.
+			// We can bind again if reuse is true for the new one.
+			if !reusePort {
+				return tcpip.ErrPortInUse
+			}
+			return multiPortEp.singleRegisterEndpoint(ep)
+		}
+		// This endpoint cannot be bound again.
+		return tcpip.ErrPortInUse
+	}
+
+	// This is a new binding.
+	if bindToDevice == 0 {
+		// We can't bind by device with nicid 0.
+		return tcpip.ErrPortInUse
+	}
+	if reusePort {
+		// We may reuse this port in the future.
+		multiPortEp := &multiPortEndpoint{}
+		multiPortEp.endpointsMap = make(map[TransportEndpoint]int)
+		multiPortEp.seed = rand.Uint32()
+		ep.endpoints[bindToDevice] = multiPortEp
+		return multiPortEp.singleRegisterEndpoint(ep)
+	}
+	ep.endpoints[bindToDevice] = t
+	return nil
+}
+
+// unregisterEndpoint returns true if endpointsByNic has to be unregistered.
+func (ep *endpointsByNic) unregisterEndpoint(bindToDevice tcpip.NICID, t TransportEndpoint) bool {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	e, ok := ep.endpoints[bindToDevice]
+	if !ok {
+		return false
+	}
+	if multiPortEp, ok := e.(*multiPortEndpoint); ok {
+		if multiPortEp.unregisterEndpoint(ep) {
+			delete(ep.endpoints, bindToDevice)
+		}
+	}
+
+	delete(ep.endpoints, bindToDevice)
+	return len(ep.endpoints) == 0
+}
+
 // unregisterEndpoint unregisters the endpoint with the given id such that it
 // won't receive any more packets.
-func (eps *transportEndpoints) unregisterEndpoint(id TransportEndpointID, ep TransportEndpoint) {
+func (eps *transportEndpoints) unregisterEndpoint(id TransportEndpointID, ep TransportEndpoint, bindToDevice tcpip.NICID) {
 	eps.mu.Lock()
 	defer eps.mu.Unlock()
 	e, ok := eps.endpoints[id]
 	if !ok {
 		return
 	}
-	if multiPortEp, ok := e.(*multiPortEndpoint); ok {
+	if epsByNic, ok := e.(*endpointsByNic); ok {
+		if !epsByNic.unregisterEndpoint(bindToDevice, ep) {
+			return
+		}
+	} else if multiPortEp, ok := e.(*multiPortEndpoint); ok {
 		if !multiPortEp.unregisterEndpoint(ep) {
 			return
 		}
@@ -85,10 +167,10 @@ func newTransportDemuxer(stack *Stack) *transportDemuxer {
 
 // registerEndpoint registers the given endpoint with the dispatcher such that
 // packets that match the endpoint ID are delivered to it.
-func (d *transportDemuxer) registerEndpoint(netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, reusePort bool) *tcpip.Error {
+func (d *transportDemuxer) registerEndpoint(netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, reusePort bool, bindToDevice tcpip.NICID) *tcpip.Error {
 	for i, n := range netProtos {
-		if err := d.singleRegisterEndpoint(n, protocol, id, ep, reusePort); err != nil {
-			d.unregisterEndpoint(netProtos[:i], protocol, id, ep)
+		if err := d.singleRegisterEndpoint(n, protocol, id, ep, reusePort, bindToDevice); err != nil {
+			d.unregisterEndpoint(netProtos[:i], protocol, id, ep, bindToDevice)
 			return err
 		}
 	}
@@ -164,7 +246,7 @@ func (ep *multiPortEndpoint) HandleControlPacket(id TransportEndpointID, typ Con
 	ep.selectEndpoint(id).HandleControlPacket(id, typ, extra, vv)
 }
 
-func (ep *multiPortEndpoint) singleRegisterEndpoint(t TransportEndpoint) {
+func (ep *multiPortEndpoint) singleRegisterEndpoint(t TransportEndpoint) *tcpip.Error {
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
@@ -173,6 +255,7 @@ func (ep *multiPortEndpoint) singleRegisterEndpoint(t TransportEndpoint) {
 	// the array fast.
 	ep.endpointsMap[t] = len(ep.endpointsArr)
 	ep.endpointsArr = append(ep.endpointsArr, t)
+	return nil
 }
 
 // unregisterEndpoint returns true if multiPortEndpoint has to be unregistered.
@@ -197,7 +280,7 @@ func (ep *multiPortEndpoint) unregisterEndpoint(t TransportEndpoint) bool {
 	return true
 }
 
-func (d *transportDemuxer) singleRegisterEndpoint(netProto tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, reusePort bool) *tcpip.Error {
+func (d *transportDemuxer) singleRegisterEndpoint(netProto tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, reusePort bool, bindToDevice tcpip.NICID) *tcpip.Error {
 	if id.RemotePort != 0 {
 		reusePort = false
 	}
@@ -210,28 +293,42 @@ func (d *transportDemuxer) singleRegisterEndpoint(netProto tcpip.NetworkProtocol
 	eps.mu.Lock()
 	defer eps.mu.Unlock()
 
-	var multiPortEp *multiPortEndpoint
-	if _, ok := eps.endpoints[id]; ok {
-		if !reusePort {
-			return tcpip.ErrPortInUse
+	if te, ok := eps.endpoints[id]; ok {
+		// There was already a bind.
+		if multiPortEp, ok := te.(*multiPortEndpoint); ok {
+			// This endpoint was previously bound with reuse and without bindToDevice.
+			// We can bind against if reuse is true for the new one.
+			if !reusePort || bindToDevice != 0 {
+				return tcpip.ErrPortInUse
+			}
+			return multiPortEp.singleRegisterEndpoint(ep)
 		}
-		multiPortEp, ok = eps.endpoints[id].(*multiPortEndpoint)
-		if !ok {
-			return tcpip.ErrPortInUse
+		if epsByNic, ok := te.(*endpointsByNic); ok {
+			// This endpoint was previously bound to device.
+			if bindToDevice == 0 {
+				return tcpip.ErrPortInUse
+			}
+			return epsByNic.registerEndpoint(ep, reusePort, bindToDevice)
 		}
+		// This endpoint cannot be bound again.
+		return tcpip.ErrPortInUse
 	}
 
+	// This is a new binding.
+	if bindToDevice != 0 {
+		// We'll bind per device.
+		epsByNic := &endpointsByNic{}
+		epsByNic.endpoints = make(map[tcpip.NICID]TransportEndpoint)
+		eps.endpoints[id] = epsByNic
+		return epsByNic.registerEndpoint(ep, reusePort, bindToDevice)
+	}
 	if reusePort {
-		if multiPortEp == nil {
-			multiPortEp = &multiPortEndpoint{}
-			multiPortEp.endpointsMap = make(map[TransportEndpoint]int)
-			multiPortEp.seed = rand.Uint32()
-			eps.endpoints[id] = multiPortEp
-		}
-
-		multiPortEp.singleRegisterEndpoint(ep)
-
-		return nil
+		// We may reuse this port in the future.
+		multiPortEp := &multiPortEndpoint{}
+		multiPortEp.endpointsMap = make(map[TransportEndpoint]int)
+		multiPortEp.seed = rand.Uint32()
+		eps.endpoints[id] = multiPortEp
+		return multiPortEp.singleRegisterEndpoint(ep)
 	}
 	eps.endpoints[id] = ep
 
@@ -240,10 +337,10 @@ func (d *transportDemuxer) singleRegisterEndpoint(netProto tcpip.NetworkProtocol
 
 // unregisterEndpoint unregisters the endpoint with the given id such that it
 // won't receive any more packets.
-func (d *transportDemuxer) unregisterEndpoint(netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint) {
+func (d *transportDemuxer) unregisterEndpoint(netProtos []tcpip.NetworkProtocolNumber, protocol tcpip.TransportProtocolNumber, id TransportEndpointID, ep TransportEndpoint, bindToDevice tcpip.NICID) {
 	for _, n := range netProtos {
 		if eps, ok := d.protocol[protocolIDs{n, protocol}]; ok {
-			eps.unregisterEndpoint(id, ep)
+			eps.unregisterEndpoint(id, ep, bindToDevice)
 		}
 	}
 }
